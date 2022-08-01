@@ -30,5 +30,6 @@
     <None Include="shader.frag">
       <Filter>Shaders</Filter>
     </None>
+    <None Include="packages.config" />
   </ItemGroup>
 </Project>
