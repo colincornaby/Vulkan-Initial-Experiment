@@ -31,5 +31,13 @@
       <Filter>Shaders</Filter>
     </None>
     <None Include="packages.config" />
+    <None Include="shader.tesc">
+      <Filter>Shaders</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="shader.tese">
+      <Filter>Shaders</Filter>
+    </Text>
   </ItemGroup>
 </Project>

@@ -130,8 +130,9 @@ public:
         createDescriptorPool();
         createDescriptorSets();
         createGraphicsPipeline();
-        createFramebuffers();
         createCommandPool();
+        createDepthResources();
+        createFramebuffers();
         createVertexBuffer();
         createCommandBuffer();
         createSyncObjects();
@@ -173,6 +174,66 @@ public:
         if (vkCreateInstance(&createInfo, nullptr, &instance) != VK_SUCCESS) {
             throw std::runtime_error("failed to create instance!");
         }
+    }
+
+    void createImage(uint32_t width, uint32_t height, vk::Format format, vk::ImageTiling tiling, vk::ImageUsageFlags usage, vk::MemoryPropertyFlags properties, vk::Image& image, vk::DeviceMemory& imageMemory) {
+        vk::ImageCreateInfo imageInfo({}, vk::ImageType::e2D, 
+            format, 
+            vk::Extent3D(width, height, 1), 
+            1, 
+            1, 
+            vk::SampleCountFlagBits::e1, 
+            tiling,
+            usage, 
+            vk::SharingMode::eExclusive, 
+            nullptr, 
+            vk::ImageLayout::eUndefined);
+
+        image = device.createImage(imageInfo);
+
+        vk::MemoryRequirements memRequirements = device.getImageMemoryRequirements(image);
+
+        vk::MemoryAllocateInfo allocInfo(memRequirements.size, findMemoryType(memRequirements.memoryTypeBits, properties));
+
+        imageMemory = device.allocateMemory(allocInfo, nullptr);
+        device.bindImageMemory(image, imageMemory, 0);
+    }
+
+    vk::ImageView createImageView(vk::Image image, vk::Format format, vk::ImageAspectFlags aspectFlags) {
+        vk::ImageViewCreateInfo viewInfo({}, 
+            image, vk::ImageViewType::e2D, 
+            format, vk::ComponentMapping(), 
+            vk::ImageSubresourceRange(aspectFlags, 0, 1, 0, 1));
+        vk::ImageView imageView = device.createImageView(viewInfo, nullptr);
+        return imageView;
+    }
+
+    void createDepthResources() {
+        vk::Format depthFormat = findDepthFormat();
+        createImage(swapChainExtent.width, swapChainExtent.height, depthFormat, vk::ImageTiling::eOptimal, vk::ImageUsageFlagBits::eDepthStencilAttachment, vk::MemoryPropertyFlagBits::eDeviceLocal, depthImage, depthImageMemory);
+        depthImageView = createImageView(depthImage, depthFormat, vk::ImageAspectFlagBits::eDepth);
+    }
+
+    vk::Format findSupportedFormat(const std::vector<vk::Format>& candidates, vk::ImageTiling tiling, vk::FormatFeatureFlagBits features) {
+        for (vk::Format format : candidates) {
+            auto props = ((vk::PhysicalDevice)physicalDevice).getFormatProperties(format);
+            if (tiling == vk::ImageTiling::eLinear && (props.linearTilingFeatures & features) == features) {
+                return format;
+            }
+            else if (tiling == vk::ImageTiling::eOptimal && (props.optimalTilingFeatures & features) == features) {
+                return format;
+            }
+        }
+        throw std::runtime_error("failed to find supported format!");
+    }
+
+    vk::Format findDepthFormat() {
+        return findSupportedFormat({ vk::Format::eD32Sfloat, vk::Format::eD32SfloatS8Uint, vk::Format::eD24UnormS8Uint },
+            vk::ImageTiling::eOptimal, vk::FormatFeatureFlagBits::eDepthStencilAttachment);
+    }
+
+    bool hasStencilComponent(vk::Format format) {
+        return format == vk::Format::eD32SfloatS8Uint || format == vk::Format::eD24UnormS8Uint;
     }
 
     void pickPhysicalDevice() {
@@ -374,6 +435,9 @@ public:
         for (auto framebuffer : swapChainFramebuffers) {
             device.destroyFramebuffer(framebuffer);
         }
+        device.destroyImageView(depthImageView);
+        device.destroyImage(depthImage);
+        device.freeMemory(depthImageMemory);
         vkDestroySwapchainKHR(device, swapChain, nullptr);
 
     }
@@ -385,6 +449,7 @@ public:
 
         createSwapChain();
         createImageViews();
+        createDepthResources();
         createFramebuffers();
     }
 
@@ -426,6 +491,9 @@ public:
     std::vector<vk::DeviceMemory> uniformBuffersMemory;
     vk::DescriptorPool descriptorPool;
     std::vector<vk::DescriptorSet> descriptorSets;
+    vk::Image depthImage;
+    vk::DeviceMemory depthImageMemory;
+    vk::ImageView depthImageView;
 
 private:
 
@@ -526,6 +594,9 @@ private:
 
         VkPhysicalDeviceFeatures deviceFeatures{};
 
+        deviceFeatures.tessellationShader = true;
+        deviceFeatures.depthBounds = true;
+
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO; 
         createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
@@ -587,14 +658,31 @@ private:
             vk::AttachmentStoreOp::eDontCare,
             vk::ImageLayout::eUndefined,
             vk::ImageLayout::ePresentSrcKHR);
+        vk::AttachmentDescription depthAttachment({},
+            findDepthFormat(),
+            vk::SampleCountFlagBits::e1,
+            vk::AttachmentLoadOp::eClear,
+            vk::AttachmentStoreOp::eDontCare,
+            vk::AttachmentLoadOp::eDontCare,
+            vk::AttachmentStoreOp::eDontCare,
+            vk::ImageLayout::eUndefined,
+            vk::ImageLayout::eDepthStencilAttachmentOptimal
+        );
 
         const auto colorAttachmentRef = vk::AttachmentReference(0, vk::ImageLayout::eColorAttachmentOptimal);
+        const auto depthAttachmentRef = vk::AttachmentReference(1, vk::ImageLayout::eDepthStencilAttachmentOptimal);
 
-        const auto subpasses = vk::SubpassDescription({}, vk::PipelineBindPoint::eGraphics, nullptr, colorAttachmentRef);
+        const auto subpasses = vk::SubpassDescription({}, vk::PipelineBindPoint::eGraphics, nullptr, colorAttachmentRef, nullptr, &depthAttachmentRef);
 
-        vk::RenderPassCreateInfo renderCreateInfo({}, colorAttachment, subpasses);
+        std::array<vk::AttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
+        vk::RenderPassCreateInfo renderCreateInfo({}, attachments, subpasses);
 
-        vk::SubpassDependency subpassDependency(VK_SUBPASS_EXTERNAL, 0, vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::AccessFlagBits(0), vk::AccessFlagBits::eColorAttachmentWrite);
+        vk::SubpassDependency subpassDependency(VK_SUBPASS_EXTERNAL, 
+            0, 
+            vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests, 
+            vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests,
+            vk::AccessFlagBits(0),
+            vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eDepthStencilAttachmentWrite);
 
         renderCreateInfo.setDependencies(subpassDependency);
 
@@ -605,8 +693,9 @@ private:
         swapChainFramebuffers.resize(swapChainImageViews.size());
 
         for (size_t i = 0; i < swapChainImageViews.size(); i++) {
-            vk::ImageView attachments[] = {
-                swapChainImageViews[i]
+            std::array<vk::ImageView, 2> attachments = {
+                swapChainImageViews[i],
+                depthImageView
             };
 
             vk::FramebufferCreateInfo framebufferInfo({}, renderPass, attachments, swapChainExtent.width, swapChainExtent.height, 1);
@@ -696,11 +785,17 @@ private:
 
         auto vertShaderCode = readFile("vert.spv");
         auto fragShaderCode = readFile("frag.spv");
+        auto tessShaderCode = readFile("tesse.spv");
+        auto tessControlShaderCode = readFile("tessc.spv");
 
         vk::ShaderModule vertShaderModule = createShaderModule(vertShaderCode);
         vk::ShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+        vk::ShaderModule tessShaderModule = createShaderModule(tessShaderCode);
+        vk::ShaderModule tessControlShaderModule = createShaderModule(tessControlShaderCode);
 
-        std::array<vk::PipelineShaderStageCreateInfo, 2> stages = {
+        std::array<vk::PipelineShaderStageCreateInfo, 4> stages = {
+            vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eTessellationControl, tessControlShaderModule, "main"),
+            vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eTessellationEvaluation, tessShaderModule, "main"),
             vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eVertex, vertShaderModule, "main"),
             vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eFragment, fragShaderModule, "main")
         };
@@ -722,7 +817,7 @@ private:
         vertexInputInfo.setVertexBindingDescriptions(bindingDescription);
         vertexInputInfo.setVertexAttributeDescriptions(attributeDescriptions);
 
-        vk::PipelineInputAssemblyStateCreateInfo inputAssembly({}, vk::PrimitiveTopology::eTriangleList, FALSE);
+        vk::PipelineInputAssemblyStateCreateInfo inputAssembly({}, vk::PrimitiveTopology::ePatchList, FALSE);
 
         vk::Viewport viewPort(0.0f, 0.0f, swapChainExtent.width, swapChainExtent.height, 0.0f, 1.0f);
         vk::Rect2D scissor({0, 0}, swapChainExtent);
@@ -744,11 +839,19 @@ private:
 
         vk::PipelineLayoutCreateInfo pipelineLayoutInfo = vk::PipelineLayoutCreateInfo({}, descriptorSetLayout);
 
+        vk::PushConstantRange push_constant({ vk::ShaderStageFlagBits::eTessellationEvaluation }, 0, sizeof(float));
+        pipelineLayoutInfo.setPushConstantRanges(push_constant);
+        pipelineLayoutInfo.setPushConstantRangeCount(1);
+
         pipelineLayout = device.createPipelineLayout(pipelineLayoutInfo);
+
+        vk::PipelineTessellationStateCreateInfo tessellationInfo({}, 3);
+
+        vk::PipelineDepthStencilStateCreateInfo depthStencil({}, true, true, vk::CompareOp::eLess, true, false, {}, {}, 0.0f, 1.0f);
 
         vk::PipelineCreateFlags flags;
 
-        vk::GraphicsPipelineCreateInfo createInfo({}, stages, &vertexInputInfo, &inputAssembly, nullptr, &viewportState, &rasterizer, &multisampling, nullptr, &colorBlending, &dynamicState, pipelineLayout, renderPass, 0);
+        vk::GraphicsPipelineCreateInfo createInfo({}, stages, &vertexInputInfo, &inputAssembly, &tessellationInfo, &viewportState, &rasterizer, &multisampling, & depthStencil, &colorBlending, &dynamicState, pipelineLayout, renderPass, 0);
        
         graphicsPipeline = device.createGraphicsPipeline(nullptr, createInfo).value;
 
@@ -781,13 +884,14 @@ private:
         return module;
     }
 
-    void recordCommandBuffer(vk::CommandBuffer commandBuffer, uint32_t imageIndex) {
+    void recordCommandBuffer(vk::CommandBuffer commandBuffer, uint32_t imageIndex, float time) {
         vk::CommandBufferBeginInfo info;
         commandBuffer.begin(info);
 
-        vk::ClearValue clearColor;
-        clearColor.color = vk::ClearColorValue(std::array<float, 4>({ { 0.0f, 0.0f, 0.0f, 1.0f } }));
-        vk::RenderPassBeginInfo beginInfo(renderPass, swapChainFramebuffers[imageIndex], vk::Rect2D({0,0}, (vk::Extent2D)swapChainExtent), clearColor);
+        std::array <vk::ClearValue, 2> clearValues;
+        clearValues[0].color = vk::ClearColorValue(std::array<float, 4>({{0.0f, 0.0f, 0.0f, 1.0f}}));
+        clearValues[1].depthStencil = vk::ClearDepthStencilValue(1.0f, 0U);
+        vk::RenderPassBeginInfo beginInfo(renderPass, swapChainFramebuffers[imageIndex], vk::Rect2D({0,0}, (vk::Extent2D)swapChainExtent), clearValues);
 
         commandBuffer.beginRenderPass(beginInfo, vk::SubpassContents::eInline);
 
@@ -802,6 +906,9 @@ private:
         commandBuffer.setScissor(0, scissor);
 
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
+
+        commandBuffer.pushConstants(pipelineLayout, vk::ShaderStageFlagBits::eTessellationEvaluation, 0, sizeof(float), &time);
+
         commandBuffer.draw(3, 1, 0, 0);
 
         commandBuffer.endRenderPass();
@@ -861,11 +968,15 @@ private:
         }
         device.resetFences(inFlightFences[currentFrame]);
 
-        updateUniformBuffer(currentFrame);
+        static auto startTime = std::chrono::high_resolution_clock::now();
+
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
+        updateUniformBuffer(currentFrame, time);
 
         auto imageIndex = result.value;
         commandBuffers[currentFrame].reset();
-        recordCommandBuffer(commandBuffers[currentFrame], imageIndex);
+        recordCommandBuffer(commandBuffers[currentFrame], imageIndex, time);
 
         auto waitStages = vk::PipelineStageFlags(vk::PipelineStageFlagBits::eColorAttachmentOutput);
 
@@ -880,14 +991,10 @@ private:
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
-    void updateUniformBuffer(uint32_t currentImage) {
-        static auto startTime = std::chrono::high_resolution_clock::now();
-
-        auto currentTime = std::chrono::high_resolution_clock::now();
-        float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
+    void updateUniformBuffer(uint32_t currentImage, float time) {
 
         UniformBufferObject ubo{};
-        ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(45.0f), glm::vec3(0.0f, 0.0f, 1.0f));
 
         ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
 
@@ -900,7 +1007,7 @@ private:
     }
 
     void createDescriptorSetLayout() {
-        vk::DescriptorSetLayoutBinding uboLayoutBinding(0, vk::DescriptorType::eUniformBuffer, 1,vk::ShaderStageFlagBits::eVertex);
+        vk::DescriptorSetLayoutBinding uboLayoutBinding(0, vk::DescriptorType::eUniformBuffer, 1,vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eTessellationEvaluation);
 
         vk::DescriptorSetLayoutCreateInfo layoutInfo({}, 1, &uboLayoutBinding);
 
