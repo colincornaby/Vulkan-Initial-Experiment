@@ -13,6 +13,7 @@
 #include <vector>
 #include <array>
 #include <optional>
+#include <optional>
 #include <set>
 #include <algorithm>
 #include <fstream>
@@ -23,6 +24,13 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <chrono>
+
+bool animationEnabled = true;
+glm::mat4 model = glm::mat4(1.0f);
+double prevMouseXPos;
+double prevMouseYPos;
+uint32_t tessCount = 1;
+bool wireframe = false;
 
 struct UniformBufferObject {
     glm::mat4 model;
@@ -477,7 +485,8 @@ public:
     vk::RenderPass renderPass;
     vk::DescriptorSetLayout descriptorSetLayout;
     vk::PipelineLayout pipelineLayout;
-    vk::Pipeline graphicsPipeline;
+    vk::Pipeline fillGraphicsPipeline;
+    vk::Pipeline wireFrameGraphicsPipeline;
     std::vector<vk::Framebuffer> swapChainFramebuffers;
     vk::CommandPool commandPool;
     std::vector<vk::CommandBuffer> commandBuffers;
@@ -771,6 +780,8 @@ private:
     }
 
     void createUniformBuffers() {
+
+
         vk::DeviceSize bufferSize = sizeof(UniformBufferObject);
 
         uniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -839,9 +850,12 @@ private:
 
         vk::PipelineLayoutCreateInfo pipelineLayoutInfo = vk::PipelineLayoutCreateInfo({}, descriptorSetLayout);
 
-        vk::PushConstantRange push_constant({ vk::ShaderStageFlagBits::eTessellationEvaluation }, 0, sizeof(float));
-        pipelineLayoutInfo.setPushConstantRanges(push_constant);
-        pipelineLayoutInfo.setPushConstantRangeCount(1);
+
+        std::array<vk::PushConstantRange, 2> pushConstants = {
+            vk::PushConstantRange({ vk::ShaderStageFlagBits::eTessellationEvaluation }, 0, sizeof(float)),
+            vk::PushConstantRange({ vk::ShaderStageFlagBits::eTessellationControl }, 4, sizeof(uint32_t))
+        };
+        pipelineLayoutInfo.setPushConstantRanges(pushConstants);
 
         pipelineLayout = device.createPipelineLayout(pipelineLayoutInfo);
 
@@ -853,7 +867,11 @@ private:
 
         vk::GraphicsPipelineCreateInfo createInfo({}, stages, &vertexInputInfo, &inputAssembly, &tessellationInfo, &viewportState, &rasterizer, &multisampling, & depthStencil, &colorBlending, &dynamicState, pipelineLayout, renderPass, 0);
        
-        graphicsPipeline = device.createGraphicsPipeline(nullptr, createInfo).value;
+        fillGraphicsPipeline = device.createGraphicsPipeline(nullptr, createInfo).value;
+
+        rasterizer.setPolygonMode(vk::PolygonMode::eLine);
+
+        wireFrameGraphicsPipeline = device.createGraphicsPipeline(nullptr, createInfo).value;
 
         device.destroy(vertShaderModule);
         device.destroy(fragShaderModule);
@@ -895,7 +913,12 @@ private:
 
         commandBuffer.beginRenderPass(beginInfo, vk::SubpassContents::eInline);
 
-        commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, graphicsPipeline);
+        if (wireframe) {
+            commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, wireFrameGraphicsPipeline);
+        }
+        else {
+            commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, fillGraphicsPipeline);
+        }
 
         commandBuffer.bindVertexBuffers(0, vertexBuffer, { 0 });
 
@@ -908,6 +931,7 @@ private:
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
 
         commandBuffer.pushConstants(pipelineLayout, vk::ShaderStageFlagBits::eTessellationEvaluation, 0, sizeof(float), &time);
+        commandBuffer.pushConstants(pipelineLayout, vk::ShaderStageFlagBits::eTessellationControl, 4, sizeof(uint32_t), &tessCount);
 
         commandBuffer.draw(3, 1, 0, 0);
 
@@ -994,7 +1018,18 @@ private:
     void updateUniformBuffer(uint32_t currentImage, float time) {
 
         UniformBufferObject ubo{};
-        ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(45.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        static float prevTime = 0;
+        float rotation = 0;
+
+        if (animationEnabled == true) {
+            float timeDelta = time - prevTime;
+            rotation = timeDelta * 45.0f;
+            model = glm::rotate(model, glm::radians(rotation), glm::vec3(0.0f, 0.0f, 1.0f));
+        }
+
+        prevTime = time;
+
+        ubo.model = model;
 
         ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
 
@@ -1020,11 +1055,55 @@ static void framebufferResizeCallback(GLFWwindow* window, int width, int height)
     app->framebufferResized = true;
 }
 
+void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
+{
+    if (key == GLFW_KEY_A && action == GLFW_PRESS) {
+        animationEnabled = !animationEnabled;
+    }
+    if (key == GLFW_KEY_W && action == GLFW_PRESS) {
+        wireframe = !wireframe;
+        
+    }
+    if (key == GLFW_KEY_KP_ADD && action != GLFW_RELEASE) {
+        tessCount++;
+    }
+    if (key == GLFW_KEY_KP_SUBTRACT && tessCount != 1 && action != GLFW_RELEASE) {
+        tessCount--;
+    }
+}
+
+static void cursor_position_callback(GLFWwindow* window, double xpos, double ypos)
+{
+    if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_RELEASE)
+    {
+        prevMouseXPos = xpos;
+        prevMouseYPos = ypos;
+        return;
+    }
+
+
+    int windowWidth, windowHeight;
+    glfwGetWindowSize(window, &windowWidth, &windowHeight);
+
+    float deltaX = (xpos - prevMouseXPos)/(float)windowWidth;
+    float deltaY = (ypos - prevMouseYPos)/(float)windowHeight;
+
+
+    model = glm::rotate(model, glm::radians(deltaX*180.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+    model = glm::rotate(model, glm::radians(deltaY*180.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+
+    prevMouseXPos = xpos;
+    prevMouseYPos = ypos;
+}
+
 int main() {
     glfwInit();
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     GLFWwindow* window = glfwCreateWindow(800, 600, "Vulkan window", nullptr, nullptr);
+
+    glfwSetKeyCallback(window, &key_callback);
+    glfwSetCursorPosCallback(window, cursor_position_callback);
 
     MyRenderer renderer(window);
     renderer.createInstance();
